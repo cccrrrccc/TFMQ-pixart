@@ -1,6 +1,6 @@
 import torch
 from enum import Enum
-from quant.quant_block import BaseQuantBlock, QuantResBlock, QuantTemporalInformationBlock, QuantTemporalInformationBlockDDIM
+from quant.quant_block import BaseQuantBlock, QuantResBlock, QuantTemporalInformationBlock, QuantTemporalInformationBlockDDIM, QuantTemporalInformationBlockPixArt
 from quant.quant_layer import QMODE, QuantLayer, lp_loss
 from quant.adaptive_rounding import AdaRoundQuantizer
 from typing import Union
@@ -156,6 +156,13 @@ class LossFuncTimeEmbedding:
                                 assert isinstance(module.wqtizer, AdaRoundQuantizer)
                                 round_vals = module.wqtizer.get_soft_tgt()
                                 round_loss += self.w * (1 - ((round_vals - .5).abs() * 2).pow(b)).sum()
+            elif isinstance(self.o, QuantTemporalInformationBlockPixArt):
+                for _, module in self.o.named_modules():
+                    if isinstance(module, QuantLayer):
+                        if not module.ignore_recon:
+                            assert isinstance(module.wqtizer, AdaRoundQuantizer)
+                            round_vals = module.wqtizer.get_soft_tgt()
+                            round_loss += self.w * (1 - ((round_vals - .5).abs() * 2).pow(b)).sum()
             else:
                 for temb_proj in self.o.temb_projs:
                     assert isinstance(temb_proj, QuantLayer)

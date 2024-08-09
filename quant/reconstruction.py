@@ -1,4 +1,4 @@
-from quant.quant_block import BaseQuantBlock, QuantAttnBlock, QuantBasicTransformerBlock, QuantQKMatMul, QuantResBlock, QuantSMVMatMul, QuantTemporalInformationBlock
+from quant.quant_block import BaseQuantBlock, QuantAttnBlock, QuantBasicTransformerBlock, QuantQKMatMul, QuantResBlock, QuantSMVMatMul, QuantTemporalInformationBlock, QuantTemporalInformationBlockPixArt
 from quant.quant_layer import QMODE, QuantLayer, StraightThrough
 from quant.quant_model import QuantModel
 from quant.adaptive_rounding import AdaRoundQuantizer, RMODE
@@ -248,6 +248,14 @@ def tib_reconstruction(block: BaseQuantBlock,
                                                             w=module.original_w.data)
                         module.wqtizer.soft_tgt = True
                         opt_params.append(module.wqtizer.alpha)
+        elif isinstance(block, QuantTemporalInformationBlockPixArt):
+            for _,module in block.named_modules():
+                if isinstance(module, QuantLayer):
+                    module.wqtizer = AdaRoundQuantizer(uaqtizer=module.wqtizer,
+                                                        rmode=RMODE.LEARNED_HARD_SIGMOID,
+                                                        w=module.original_w.data)
+                    module.wqtizer.soft_tgt = True
+                    opt_params.append(module.wqtizer.alpha)
         else:
             for temb_proj in block.temb_projs:
                 assert isinstance(temb_proj, QuantLayer)
@@ -269,6 +277,10 @@ def tib_reconstruction(block: BaseQuantBlock,
                 for _, module in emb_layers.named_modules():
                     if isinstance(module, QuantLayer):
                         opt_params.append(module.aqtizer.delta)
+        elif isinstance(block, QuantTemporalInformationBlockPixArt):
+            for _, module in block.named_modules():
+                if isinstance(module, QuantLayer):
+                    opt_params.append(module.aqtizer.delta)
         else:
             for temb_proj in block.temb_projs:
                 assert isinstance(temb_proj, QuantLayer)
@@ -310,6 +322,10 @@ def tib_reconstruction(block: BaseQuantBlock,
             for _, module in emb_layers.named_modules():
                 if isinstance(module, QuantLayer):
                     module.wqtizer.soft_tgt = False
+    elif isinstance(block, QuantTemporalInformationBlockPixArt):
+        for _,module in block.named_modules():
+            if isinstance(module, QuantLayer):
+                module.wqtizer.soft_tgt = False
     else:
         for temb_proj in block.temb_projs:
             assert isinstance(temb_proj, QuantLayer)

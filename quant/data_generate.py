@@ -8,7 +8,33 @@ from ldm.models.diffusion.plms import PLMSSampler
 from typing import Tuple
 from torch import autocast
 import torch
+import torchvision.transforms as transforms
+from diffusers import PixArtAlphaPipeline, PixArtSigmaPipeline
 
+def generate_cali_data_pixart(args, sample_data) -> Tuple[torch.Tensor]:
+    def get_train_samples_custom_ucs(args, sample_data, custom_steps=None):
+        num_samples, num_st = args.cali_n, args.cali_st
+        tmp = list()
+        # get the real number of timesteps (especially for DDIM)
+        nsteps = len(sample_data["ts"])
+        timesteps = list(range(0, nsteps, nsteps//num_st))
+        xs_lst = [sample_data["xs"][i][:num_samples] for i in timesteps]
+        ts_lst = [sample_data["ts"][i][:num_samples] for i in timesteps]
+        cs_lst = [sample_data["cs"][i][:num_samples] for i in timesteps]
+        ucs_lst = [sample_data["ucs"][i][:num_samples] for i in timesteps]
+        for i in range(len(xs_lst)):
+            x_t = xs_lst[i]
+            t_t = ts_lst[i]
+            c_t = cs_lst[i]
+            uc_t = ucs_lst[i]
+            tmp += [[x_t, t_t, c_t], [x_t, t_t, uc_t]]
+        cali_data = ()
+        for i in range(len(tmp[0])):
+            cali_data += (torch.cat([x[i] for x in tmp]), )
+        return cali_data 
+
+    cali_data = get_train_samples_custom_ucs(args, sample_data)
+    return cali_data
 
 def generate_cali_text_guided_data(model: LatentDiffusion,
                                    sampler: Union[DPMSolverSampler, PLMSSampler, DDIMSampler],

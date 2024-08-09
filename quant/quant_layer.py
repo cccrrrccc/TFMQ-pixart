@@ -335,6 +335,9 @@ class QuantLayer(nn.Module):
         w = w.to(x.device)
         if type(b) == torch.Tensor:
             b = b.to(x.device)
+        x = x.half()
+        w = w.half()
+        b = b.half()
         x = self.kwd_func(x, w, b, **self.fwd_kwargs)
         x = self.act_func(x)
         return x

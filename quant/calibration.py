@@ -15,6 +15,12 @@ import linklink as dist
 import logging
 logger = logging.getLogger(__name__)
 
+def pixart_alpha_aca_dict(x):
+    bs = x.shape[0]
+    hw = x.shape[2] * 8
+    return {'resolution': torch.Tensor([[hw, hw]]).expand(bs, -1).to("cuda:0", torch.float16),
+            'aspect_ratio': torch.Tensor([[1.]]).expand(bs, -1).to("cuda:0", torch.float16)
+            }
 
 def uaq2adar(model: nn.Module):
     for _, child in model.named_children():
@@ -87,8 +93,10 @@ def cali_model(qnn: QuantModel,
     cali_data = w_cali_data
     qnn.set_quant_state(use_wq = True, use_aq = False)
     batch_size = min(8, cali_data[0].shape[0])
-    inputs = (x[: batch_size].cuda() for x in cali_data) 
-    qnn(*inputs)
+    #inputs = (x[: batch_size].cuda() for x in cali_data)
+    inputs = [x[: batch_size].cuda() for x in cali_data]
+    #qnn(*inputs)
+    qnn(inputs[0], timestep=inputs[1], encoder_hidden_states=inputs[2], added_cond_kwargs = pixart_alpha_aca_dict(inputs[0]))
     qnn.disable_out_quantization()
 
     # --------- weight quantization -------- #
@@ -124,7 +132,8 @@ def cali_model(qnn: QuantModel,
             with torch.no_grad():
                 inds = np.random.choice(t_cali_data[0].shape[0], 16, replace=False)
                 inputs = (x[inds].cuda() for x in t_cali_data)
-                _ = qnn(*inputs)
+                # _ = qnn(*inputs)
+                _ = qnn(inputs[0], timestep=inputs[1], encoder_hidden_states=inputs[2], added_cond_kwargs = pixart_alpha_aca_dict(inputs[0]))
                 if running_stat:
                     logger.info('running stat for activation calibration...')
                     inds = np.arange(t_cali_data[0].shape[0])
@@ -132,7 +141,8 @@ def cali_model(qnn: QuantModel,
                     qnn.set_running_stat(True)
                     for i in trange(0, t_cali_data[0].shape[0], batch_size):
                         inputs = (x[inds[i: i + batch_size]].cuda() for x in t_cali_data)
-                        _ = qnn(*inputs)
+                        # _ = qnn(*inputs)
+                        _ = qnn(inputs[0], timestep=inputs[1], encoder_hidden_states=inputs[2], added_cond_kwargs = pixart_alpha_aca_dict(inputs[0]))
                     qnn.set_running_stat(False)
                     logger.info('running stat for activation calibration done.')
                 torch.cuda.empty_cache()
@@ -318,8 +328,10 @@ def cali_model_multi(gpu: int,
             module: Union[UniformAffineQuantizer, AdaRoundQuantizer]
             module.init = False
     batch_size = min(64, cali_data[0].shape[0])
-    inputs = (x[: batch_size].cuda() for x in cali_data)
-    qnn(*inputs)
+    #inputs = (x[: batch_size].cuda() for x in cali_data)
+    inputs = [x[: batch_size].cuda() for x in cali_data]
+    # qnn(*inputs)
+    qnn(inputs[0], timestep=inputs[1], context=inputs[2], added_cond_kwargs = pixart_alpha_aca_dict(inputs[0]))
     qnn.disable_out_quantization()
 
     # --------- weight quantization -------- #
@@ -356,7 +368,8 @@ def cali_model_multi(gpu: int,
             with torch.no_grad():
                 inds = np.random.choice(t_cali_data[0].shape[0], 16, replace=False)
                 inputs = (x[inds].cuda() for x in t_cali_data)
-                _ = qnn(*inputs)
+                # _ = qnn(*inputs)
+                _ = qnn(inputs[0], timestep=inputs[1], encoder_hidden_states=inputs[2], added_cond_kwargs = pixart_alpha_aca_dict(inputs[0]))
                 if running_stat:
                     logger.info('running stat for activation calibration...')
                     inds = np.arange(t_cali_data[0].shape[0])
@@ -364,7 +377,8 @@ def cali_model_multi(gpu: int,
                     qnn.set_running_stat(True)
                     for i in trange(0, t_cali_data[0].shape[0], batch_size):
                         inputs = (x[inds[i: i + batch_size]].cuda() for x in t_cali_data)
-                        _ = qnn(*inputs)
+                        #_ = qnn(*inputs)
+                        _ = qnn(inputs[0], timestep=inputs[1], encoder_hidden_states=inputs[2], added_cond_kwargs = pixart_alpha_aca_dict(inputs[0]))
                     qnn.set_running_stat(False)
                     logger.info('running stat for activation calibration done.')
                 if ngpus_per_node > 1:

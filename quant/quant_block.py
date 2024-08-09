@@ -1,5 +1,5 @@
 from typing import Dict, Tuple
-
+import diffusers
 from ldm.modules.diffusionmodules.util import timestep_embedding
 from ddim.models.diffusion import AttnBlock, ResnetBlock, get_timestep_embedding, nonlinearity
 from ldm.modules.diffusionmodules.openaimodel import AttentionBlock, QKMatMul, ResBlock, SMVMatMul, TimestepBlock, checkpoint
@@ -11,6 +11,9 @@ from ldm.modules.attention import exists, default, CrossAttention
 from einops import rearrange, repeat
 from types import MethodType
 from quant.quant_layer import QuantLayer, UniformAffineQuantizer, StraightThrough
+from diffusers.models.embeddings import TimestepEmbedding, PixArtAlphaCombinedTimestepSizeEmbeddings
+from diffusers.models.normalization import AdaLayerNormSingle
+from typing import Optional
 
 
 class BaseQuantBlock(nn.Module):
@@ -32,6 +35,41 @@ class BaseQuantBlock(nn.Module):
             if isinstance(m, QuantLayer):
                 m.set_quant_state(use_wq=use_wq, use_aq=use_aq)
 
+
+class QuantTemporalInformationBlockPixArt(BaseQuantBlock):
+
+    def __init__(self,
+                 adaln: AdaLayerNormSingle,
+                 aq_params: dict = {},
+                 ) -> None:
+        super().__init__(aq_params)
+        self.emb = adaln.emb
+
+        self.silu = adaln.silu
+        self.linear = adaln.linear
+
+    def forward(
+        self,
+        timestep: th.Tensor,
+        added_cond_kwargs: Optional[Dict[str, th.Tensor]] = None,
+        batch_size: Optional[int] = None,
+        hidden_dtype: Optional[th.dtype] = None,
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        # No modulation happening here.
+        embedded_timestep = self.emb(timestep, **added_cond_kwargs, batch_size=batch_size, hidden_dtype=hidden_dtype)
+        return self.linear(self.silu(embedded_timestep)), embedded_timestep
+
+    def set_quant_state(self,
+                        use_wq: bool = False,
+                        use_aq: bool = False
+                        ) -> None:
+        for m in self.modules():
+            if isinstance(m, QuantLayer):
+                m.set_quant_state(use_wq=use_wq, use_aq=use_aq)
+        for emb_layer in self.emb_layers:
+            for m in emb_layer.modules():
+                if isinstance(m, QuantLayer):
+                    m.set_quant_state(use_wq=use_wq, use_aq=use_aq)
 
 class QuantTemporalInformationBlockDDIM(BaseQuantBlock):
 
@@ -511,6 +549,7 @@ def b2qb(use_aq: bool = False) -> Dict[nn.Module, BaseQuantBlock]:
         BasicTransformerBlock.__name__: QuantBasicTransformerBlock,
         ResnetBlock.__name__: QuantResnetBlock,
         AttnBlock.__name__: QuantAttnBlock,
+        diffusers.models.attention.BasicTransformerBlock.__name__: QuantDiffBTB
     }
     if use_aq:
         D[QKMatMul.__name__] = QuantQKMatMul
@@ -518,3 +557,236 @@ def b2qb(use_aq: bool = False) -> Dict[nn.Module, BaseQuantBlock]:
     else:
         D[AttentionBlock.__name__] = QuantAttentionBlock
     return D
+
+import diffusers
+from typing import Optional, Any, Dict
+from quant.quant_aware_attn_processors import QuantAttnProcessor
+
+class QuantDiffBTB(BaseQuantBlock):
+    def __init__(self, tran,#: diffusers.models.attention.BasicTransformerBlock,
+                 act_quant_params: dict = {}, sm_abit: int = 8):
+        super().__init__(act_quant_params)
+        self.only_cross_attention = tran.only_cross_attention
+        self.use_ada_layer_norm_zero = tran.use_ada_layer_norm_zero
+        self.use_ada_layer_norm = tran.use_ada_layer_norm
+
+        self.use_ada_layer_norm_single = tran.use_ada_layer_norm_single # new
+        self.use_layer_norm = tran.use_layer_norm # new
+        self.use_ada_layer_norm_continuous = tran.use_ada_layer_norm_continuous # new
+        self.norm_type = tran.norm_type # new
+        self.num_embeds_ada_norm = tran.num_embeds_ada_norm # new
+        self.pos_embed = tran.pos_embed # new
+
+        self.norm1 = tran.norm1
+        self.attn1 = tran.attn1
+        self.norm2 = tran.norm2
+        self.attn2 = tran.attn2
+        if hasattr(tran, "norm3"):
+            self.norm3 = tran.norm3
+        else:
+            self.norm3 = self.norm2
+        self.ff = tran.ff
+
+        if hasattr(tran, "fuser"):
+            self.fuser = tran.fuser
+        if hasattr(tran, "scale_shift_table"):
+            self.scale_shift_table = tran.scale_shift_table
+
+        self._chunk_size = tran._chunk_size
+        self._chunk_dim = tran._chunk_dim
+        self.set_chunk_feed_forward = tran.set_chunk_feed_forward  # This is a function handle, not variable
+
+        # Check that the Attention Processor is correct
+        assert isinstance(self.attn1.processor, (diffusers.models.attention_processor.AttnProcessor, diffusers.models.attention_processor.AttnProcessor2_0)), "Need to implement a different attention processor"
+        self.attn1.set_processor(QuantAttnProcessor())
+
+        if self.attn2 is not None:
+            assert isinstance(self.attn2.processor, (diffusers.models.attention_processor.AttnProcessor, diffusers.models.attention_processor.AttnProcessor2_0)), "Need to implement a different attention processor"
+            self.attn2.set_processor(QuantAttnProcessor())
+
+        self.checkpoint = False
+        self.attn1.act_quantizer_q = UniformAffineQuantizer(**act_quant_params)
+        self.attn1.act_quantizer_k = UniformAffineQuantizer(**act_quant_params)
+        self.attn1.act_quantizer_v = UniformAffineQuantizer(**act_quant_params)
+
+        if self.attn2 is not None:
+            self.attn2.act_quantizer_q = UniformAffineQuantizer(**act_quant_params)
+            self.attn2.act_quantizer_k = UniformAffineQuantizer(**act_quant_params)
+            self.attn2.act_quantizer_v = UniformAffineQuantizer(**act_quant_params)
+
+        act_quant_params_w = act_quant_params.copy()
+        act_quant_params_w['bits'] = sm_abit
+        act_quant_params_w['always_zero'] = True
+        self.attn1.act_quantizer_w = UniformAffineQuantizer(**act_quant_params_w)
+
+        self.attn1.use_aq = False
+        
+        if self.attn2 is not None:
+            self.attn2.act_quantizer_w = UniformAffineQuantizer(**act_quant_params_w)
+            self.attn2.use_aq = False
+
+    def set_quant_state(self, use_wq: bool = False, use_aq: bool = False):
+        self.attn1.use_aq = use_aq
+        if self.attn2 is not None:
+            self.attn2.use_aq = use_aq
+
+        self.use_wq = use_wq
+        self.use_aq = use_aq
+        for m in self.modules():
+            if isinstance(m, QuantLayer):
+                m.set_quant_state(use_wq, use_aq)
+
+    def forward(self, 
+                hidden_states,
+                attention_mask: Optional[th.Tensor] = None,
+                encoder_hidden_states: Optional[th.Tensor] = None,
+                encoder_attention_mask: Optional[th.Tensor] = None,
+                timestep: Optional[th.LongTensor] = None,
+                cross_attention_kwargs: Dict[str, Any] = None,
+                class_labels: Optional[th.LongTensor] = None,
+                added_cond_kwargs: Optional[Dict[str, th.Tensor]] = None):
+    
+        if len(self._forward_hooks) > 0:
+            self.am_cache = attention_mask
+            self.ehs_cache = encoder_hidden_states
+            self.eam_cache = encoder_attention_mask
+            self.ts_cache = timestep
+            self.cak_cache = cross_attention_kwargs
+            self.class_labels = class_labels
+            self.added_cond_kwargs = added_cond_kwargs
+        else:
+            self.am_cache = None
+            self.ehs_cache = None
+            self.eam_cache = None
+            self.ts_cache = None
+            self.cak_cache = None
+            self.class_labels = None
+            self.added_cond_kwargs = added_cond_kwargs
+        return checkpoint(self._forward, (hidden_states, attention_mask, encoder_hidden_states, encoder_attention_mask, timestep, cross_attention_kwargs, class_labels, added_cond_kwargs), self.parameters(), self.checkpoint)
+    
+    # A direct copy of Diffusers v0.19.0 BasicTransformerBlock forward function
+    # https://github.com/huggingface/diffusers/blob/v0.19.0/src/diffusers/models/attention.py#L28
+    # With minor changes to facilitate activation quantization of intermediate tensors, e.g, QK and SMV.
+    def _forward(
+        self,
+        hidden_states,   # Not None
+        attention_mask: Optional[th.FloatTensor] = None,  # None
+        encoder_hidden_states: Optional[th.FloatTensor] = None, # Not None
+        encoder_attention_mask: Optional[th.FloatTensor] = None, # None
+        timestep: Optional[th.LongTensor] = None, # Not None
+        cross_attention_kwargs: Dict[str, Any] = None, # None
+        class_labels: Optional[th.LongTensor] = None, # None
+        added_cond_kwargs: Optional[Dict[str, th.Tensor]] = None  # None
+    ):
+        
+        if cross_attention_kwargs is not None:
+            if cross_attention_kwargs.get("scale", None) is not None:
+                logger.warning("Passing `scale` to `cross_attention_kwargs` is deprecated. `scale` will be ignored.")
+        
+        # Notice that normalization is always applied before the real computation in the following blocks.
+        # 0. Self-Attention
+        batch_size = hidden_states.shape[0]
+
+        if self.norm_type == "ada_norm":
+            norm_hidden_states = self.norm1(hidden_states, timestep)
+        elif self.norm_type == "ada_norm_zero":
+            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(
+                hidden_states, timestep, class_labels, hidden_dtype=hidden_states.dtype
+            )
+        elif self.norm_type in ["layer_norm", "layer_norm_i2vgen"]:
+            norm_hidden_states = self.norm1(hidden_states)
+        elif self.norm_type == "ada_norm_continuous":
+            norm_hidden_states = self.norm1(hidden_states, added_cond_kwargs["pooled_text_emb"])
+        elif self.norm_type == "ada_norm_single":
+            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+                self.scale_shift_table[None] + timestep.reshape(batch_size, 6, -1)
+            ).chunk(6, dim=1)
+            norm_hidden_states = self.norm1(hidden_states)
+            norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
+            norm_hidden_states = norm_hidden_states.squeeze(1)
+        else:
+            raise ValueError("Incorrect norm used")
+
+        if self.pos_embed is not None:
+            norm_hidden_states = self.pos_embed(norm_hidden_states)
+
+        # 1. Prepare GLIGEN inputs
+        cross_attention_kwargs = cross_attention_kwargs.copy() if cross_attention_kwargs is not None else {}
+        gligen_kwargs = cross_attention_kwargs.pop("gligen", None)
+
+        attn_output = self.attn1(
+            norm_hidden_states,
+            encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
+            attention_mask=attention_mask,
+            **cross_attention_kwargs,
+        )
+
+        if self.norm_type == "ada_norm_zero":
+            attn_output = gate_msa.unsqueeze(1) * attn_output
+        elif self.norm_type == "ada_norm_single":
+            attn_output = gate_msa * attn_output
+
+        hidden_states = attn_output + hidden_states
+        if hidden_states.ndim == 4:
+            hidden_states = hidden_states.squeeze(1)
+
+        # 1.2 GLIGEN Control
+        if gligen_kwargs is not None:
+            hidden_states = self.fuser(hidden_states, gligen_kwargs["objs"])
+
+        # 3. Cross-Attention
+        if self.attn2 is not None:
+            if self.norm_type == "ada_norm":
+                norm_hidden_states = self.norm2(hidden_states, timestep)
+            elif self.norm_type in ["ada_norm_zero", "layer_norm", "layer_norm_i2vgen"]:
+                norm_hidden_states = self.norm2(hidden_states)
+            elif self.norm_type == "ada_norm_single":
+                # For PixArt norm2 isn't applied here:
+                # https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L70C1-L76C103
+                norm_hidden_states = hidden_states
+            elif self.norm_type == "ada_norm_continuous":
+                norm_hidden_states = self.norm2(hidden_states, added_cond_kwargs["pooled_text_emb"])
+            else:
+                raise ValueError("Incorrect norm")
+
+            if self.pos_embed is not None and self.norm_type != "ada_norm_single":
+                norm_hidden_states = self.pos_embed(norm_hidden_states)
+
+            attn_output = self.attn2(
+                norm_hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                attention_mask=encoder_attention_mask,
+                **cross_attention_kwargs,
+            )
+            hidden_states = attn_output + hidden_states
+        
+        # 4. Feed-forward
+        # i2vgen doesn't have this norm 🤷‍♂️
+        if self.norm_type == "ada_norm_continuous":
+            norm_hidden_states = self.norm3(hidden_states, added_cond_kwargs["pooled_text_emb"])
+        elif not self.norm_type == "ada_norm_single":
+            norm_hidden_states = self.norm3(hidden_states)
+
+        if self.norm_type == "ada_norm_zero":
+            norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+
+        if self.norm_type == "ada_norm_single":
+            norm_hidden_states = self.norm2(hidden_states)
+            norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
+
+        if self._chunk_size is not None:
+            # "feed_forward_chunk_size" can be used to save memory
+            ff_output = _chunked_feed_forward(self.ff, norm_hidden_states, self._chunk_dim, self._chunk_size)
+        else:
+            ff_output = self.ff(norm_hidden_states)
+
+        if self.norm_type == "ada_norm_zero":
+            ff_output = gate_mlp.unsqueeze(1) * ff_output
+        elif self.norm_type == "ada_norm_single":
+            ff_output = gate_mlp * ff_output
+
+        hidden_states = ff_output + hidden_states
+        if hidden_states.ndim == 4:
+            hidden_states = hidden_states.squeeze(1)
+
+        return hidden_states

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from quant.quant_layer import QuantLayer
 from quant.quant_model import QuantModel
-from quant.quant_block import BaseQuantBlock, QuantBasicTransformerBlock
+from quant.quant_block import BaseQuantBlock, QuantBasicTransformerBlock, QuantDiffBTB
 from typing import Union, Tuple
 import logging
 logger = logging.getLogger(__name__)
@@ -134,6 +134,7 @@ class GetLayerInpOut:
         self.model.set_quant_state(False, False)
 
         handle = self.layer.register_forward_hook(self.data_saver, with_kwargs=True)
+        #handle = self.layer.register_forward_hook(self.data_saver)
         with torch.no_grad():
             try:
                 if cs is not None:
@@ -161,6 +162,15 @@ class GetLayerInpOut:
         self.model.set_quant_state(False, False)
         self.layer.set_quant_state(True, self.use_aq)
         self.model.train()
+        if isinstance(self.layer, QuantDiffBTB):
+            return (self.data_saver.input_store[0].detach().cpu(),
+                    self.data_saver.input_store[1].detach().cpu() if self.data_saver.input_store[1] is not None else None,
+                    self.data_saver.input_store[2].detach().cpu() if self.data_saver.input_store[2] is not None else None,
+                    self.data_saver.input_store[3].detach().cpu() if self.data_saver.input_store[3] is not None else None,
+                    self.data_saver.input_store[4].detach().cpu() if self.data_saver.input_store[4] is not None else None,
+                    self.data_saver.input_store[5].detach().cpu() if self.data_saver.input_store[5] is not None else None,
+                    self.data_saver.input_store[6].detach().cpu() if self.data_saver.input_store[6] is not None else None,
+                    self.data_saver.input_store[7].detach().cpu() if self.data_saver.input_store[7] is not None else None), self.data_saver.output_store.detach().cpu()
         input_stores = tuple(x.detach() for x in self.data_saver.input_store)
         if isinstance(self.data_saver.output_store, torch.Tensor):
             output_stores = tuple([self.data_saver.output_store.detach()])

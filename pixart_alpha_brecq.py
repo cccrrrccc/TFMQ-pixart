@@ -24,7 +24,7 @@ from ldm.models.diffusion.plms import PLMSSampler
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from transformers import AutoFeatureExtractor
 from quant.calibration import cali_model, cali_model_multi, load_cali_model
-from quant.data_generate import generate_cali_text_guided_data
+from quant.data_generate import generate_cali_text_guided_data, generate_cali_data_pixart
 
 from quant.quant_layer import QMODE, Scaler
 from quant.quant_model import QuantModel
@@ -33,6 +33,7 @@ import torch.multiprocessing as mp
 import pandas as pd
 import json
 
+
 logger = logging.getLogger(__name__)
 
 # load safety model
@@ -40,6 +41,13 @@ safety_model_id = "CompVis/stable-diffusion-safety-checker"
 safety_feature_extractor = AutoFeatureExtractor.from_pretrained(safety_model_id)
 safety_checker = StableDiffusionSafetyChecker.from_pretrained(safety_model_id)
 
+
+def pixart_alpha_aca_dict(x):
+    bs = x.shape[0]
+    hw = x.shape[2] * 8
+    return {'resolution': torch.Tensor([[hw, hw]]).expand(bs, -1).to("cuda:0", torch.float16),
+            'aspect_ratio': torch.Tensor([[1.]]).expand(bs, -1).to("cuda:0", torch.float16)
+            }
 
 def chunk(it, size):
     it = iter(it)
@@ -330,6 +338,23 @@ def main():
         action='store_true',
         help='whether to use activation quantization'
     )
+    parser.add_argument(
+        "--coco_9k", action="store_true", default=False,
+        help="generate images for coco val prompts 1000-9999")
+    parser.add_argument(
+        "--coco_10k", action="store_true", default=False,
+        help="generate images for coco val prompts 0-9999")
+    parser.add_argument(
+        "--pixart", action="store_true", default=False,
+        help="generate images for 120 high-detailed pixart prompts (no ground truth)")
+    parser.add_argument(
+        "--cali_n", type=int, default=1,  # 128
+        help="number of samples for each timestep for qdiff reconstruction"
+    )
+    parser.add_argument(
+        "--cali_st", type=int, default=20,
+        help="number of samples for each timestep for qdiff reconstruction"
+    )
     # multi-gpu configs
     parser.add_argument('--multi_gpu', action='store_true', help='use multiple gpus')
     parser.add_argument('--dist-url', default='tcp://127.0.0.1:3367', type=str, help='')
@@ -363,20 +388,30 @@ def main():
         ]
     )
     logger = logging.getLogger(__name__)
+    from diffusers import PixArtAlphaPipeline
+    model = PixArtAlphaPipeline.from_pretrained("PixArt-alpha/PixArt-XL-2-1024-MS", torch_dtype=torch.float16).to("cuda")
+    #model = PixArtAlphaPipeline.from_pretrained("PixArt-alpha/PixArt-XL-2-512x512", torch_dtype=torch.float16).to("cuda")
+    # NOTE to Ruichen. For debugging, you can do this to cheat and make sure the code functionally works. Since the transformer_blocks are sequential.
+    #model.transformer.transformer_blocks = model.transformer.transformer_blocks[:1]
+    from quant.caption_util import get_captions
+    pes, pams, npe, npam = get_captions("alpha", model, 
+                        coco_9k=opt.coco_9k,
+                        coco_10k=opt.coco_10k,
+                        pixart=opt.pixart)
 
-    config = OmegaConf.load(f"{opt.config}")
-    model = load_model_from_config(config, f"{opt.ckpt}")
+    model.text_encoder = model.text_encoder.to("cpu")
+
+    if opt.coco_9k:
+        sp = "samples_9k"
+    elif opt.coco_10k:
+        sp = "samples_10k"
+    elif opt.pixart:
+        sp = "samples_pixart"
+    else:
+        sp = "samples"
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
-
-    if opt.plms:
-        sampler = PLMSSampler(model)
-    elif opt.dpm_solver:
-        sampler = DPMSolverSampler(model)
-    else:
-        sampler = DDIMSampler(model)
-
 
     p = [QMODE.NORMAL.value]
     p.append(QMODE.QDIFF.value)
@@ -394,8 +429,7 @@ def main():
     if opt.ptq:
         # LatentDiffsion --> Diffusionwrapper --> Unet
         if not opt.cali:
-            setattr(sampler.model.model.diffusion_model, "split", True)
-            qnn = QuantModel(model=sampler.model.model.diffusion_model,
+            qnn = QuantModel(model=model.transformer,
                              wq_params=wq_params,
                              aq_params=aq_params,
                              cali=False,
@@ -418,19 +452,12 @@ def main():
                 sampler.model.model.iter = 0
         else:
             logger.info("Generating calibration data...")
-            cali_data = generate_cali_text_guided_data(model,
-                                                       sampler,
-                                                       T=opt.ddim_steps,
-                                                       c=1,
-                                                       batch_size=1,
-                                                       prompts=get_prompts(opt.data_path, 1),
-                                                       shape=[opt.C, opt.H // opt.f, opt.W // opt.f],
-                                                       precision_scope=autocast if opt.precision=="autocast" else nullcontext)
+            sample_data = torch.load('/home/ruichen/pixart-fp/pixart_calib_brecq.pt')
+            cali_data = generate_cali_data_pixart(opt, sample_data)
             a_cali_data = cali_data
             w_cali_data = cali_data
             logger.info("Calibration data generated.")
             torch.cuda.empty_cache()
-            setattr(sampler.model.model.diffusion_model, "split", True)
             if opt.multi_gpu:
                 kwargs = dict(iters=1, #20000
                               batch_size=32,
@@ -460,7 +487,7 @@ def main():
                                                  opt.running_stat,
                                                  kwargs), nprocs=ngpus_per_node)
             else:
-                qnn = QuantModel(model=sampler.model.model.diffusion_model,
+                qnn = QuantModel(model=model.transformer,
                                  wq_params=wq_params,
                                  aq_params=aq_params,
                                  softmax_a_bit=opt.softmax_a_bit,
@@ -485,32 +512,11 @@ def main():
                            running_stat=opt.running_stat,
                            interval=256,
                            **kwargs)
-            exit(0)
+        model.transformer = qnn
+    #model.text_encoder = model.text_encoder.to("cuda")
 
-    logging.info("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
-    wm = "StableDiffusionV1"
-    wm_encoder = WatermarkEncoder()
-    wm_encoder.set_watermark('bytes', wm.encode('utf-8'))
-
-    batch_size = opt.n_samples
-    n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
-    if not opt.from_file:
-        prompt = opt.prompt
-        assert prompt is not None
-        data = [batch_size * [prompt]]
-
-    else:
-        logging.info(f"reading prompts from {opt.from_file}")
-        with open(opt.from_file, "r") as f:
-            data = f.read().splitlines()
-            data = list(chunk(data, batch_size))
-    if opt.data_path is not "":
-        data = prompts4eval(opt.data_path, batch_size)
-        opt.n_iter = 1
-    sample_path = os.path.join(outpath, "imags")
+    sample_path = os.path.join(outpath, sp)
     os.makedirs(sample_path, exist_ok=True)
-    os.makedirs(os.path.join(outpath, "texts"), exist_ok=True)
-    os.makedirs(os.path.join(outpath, "numpy"), exist_ok=True)
     base_count = len(os.listdir(sample_path))
     grid_count = len(os.listdir(outpath)) - 1
 
@@ -523,79 +529,29 @@ def main():
         logger.info("UNet model")
         logger.info(model.model)
 
-    start_code = None
-    if opt.fixed_code:
-        start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
+    #start_code = None
+    #if opt.fixed_code:
+    #    start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
 
-    precision_scope = autocast if opt.precision=="autocast" else nullcontext
-    with torch.no_grad():
-        with precision_scope("cuda"):
-            with model.ema_scope():
-                tic = time.time()
-                all_samples = list()
-                all_images= []
-                for n in trange(opt.n_iter, desc="Sampling"):
-                    for prompts in tqdm(data, desc="data"):
-                        uc = None
-                        if opt.scale != 1.0:
-                            uc = model.get_learned_conditioning(batch_size * [""])
-                        if isinstance(prompts, tuple):
-                            prompts = list(prompts)
-                        c = model.get_learned_conditioning(prompts)
-                        shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
-                        samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
-                                                         conditioning=c,
-                                                         batch_size=opt.n_samples,
-                                                         shape=shape,
-                                                         verbose=False,
-                                                         unconditional_guidance_scale=opt.scale,
-                                                         unconditional_conditioning=uc,
-                                                         eta=opt.ddim_eta,
-                                                         x_T=start_code)
-                        x_samples_ddim = model.decode_first_stage(samples_ddim)
-                        x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-                        x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
+    batch_size = opt.n_samples
+    for i in tqdm(range(0, pes.shape[0], batch_size), desc="data"):
+        torch.manual_seed(42) # Meaning of Life, the Universe and Everything
+        #prompts = data[i:i + batch_size]
+        #prompts = [p[0] for p in prompts]
+        #prompt_embeds = 
+        #image = model(prompt=prompts, height=opt.res, width=opt.res).images
+        prompt_embeds = pes[i:i + batch_size].to("cuda")
+        image = model(prompt=None, negative_prompt=None,
+                      prompt_embeds=prompt_embeds,
+                      prompt_attention_mask = pams[i:i + batch_size].to("cuda"),
+                      negative_prompt_embeds = npe.expand(prompt_embeds.shape[0], -1, -1),
+                      negative_prompt_attention_mask = npam.expand(prompt_embeds.shape[0], -1),
+                      height=opt.res, width=opt.res).images
 
-                        x_checked_image = x_samples_ddim
-                        # x_checked_image, has_nsfw_concept = check_safety(x_samples_ddim)
+        for j, img in enumerate(image):
+            img.save(os.path.join(sample_path, f"{i+j}.png"))
 
-                        x_checked_image_torch = torch.from_numpy(x_checked_image).permute(0, 3, 1, 2)
-
-                        if not opt.skip_save:
-                            for x_sample in x_checked_image_torch:
-                                x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                                img = Image.fromarray(x_sample.astype(np.uint8))
-                                img = put_watermark(img, wm_encoder)
-                                img.save(os.path.join(sample_path, f"{base_count:05}.png"))
-                                with open(os.path.join(outpath, 'texts', f"{base_count:05}.txt"), "w") as f:
-                                    f.write(prompts[base_count % batch_size])
-                                base_count += 1
-                            imags = 255. * rearrange(x_checked_image_torch, 'n c h w -> n h w c').cpu().numpy()
-                            imags = imags.astype(np.uint8)
-                            all_images.extend([imags])
-
-                        if not opt.skip_grid:
-                            all_samples.append(x_checked_image_torch)
-
-                if not opt.skip_grid:
-                    # additionally, save as grid
-                    grid = torch.stack(all_samples, 0)
-                    grid = rearrange(grid, 'n b c h w -> (n b) c h w')
-                    grid = make_grid(grid, nrow=n_rows)
-
-                    # to image
-                    grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-                    img = Image.fromarray(grid.astype(np.uint8))
-                    img = put_watermark(img, wm_encoder)
-                    img.save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
-                    grid_count += 1
-
-                toc = time.time()
-
-                all_img = np.concatenate(all_images, axis=0)
-                shape_str = "x".join([str(x) for x in all_img.shape])
-                nppath = os.path.join(outpath, 'numpy', f"{shape_str}-samples.npz")
-                np.savez(nppath, all_img)
+        #toc = time.time()
 
     logging.info(f"Your samples are ready and waiting for you here: \n{outpath} \n"
           f" \nEnjoy.")

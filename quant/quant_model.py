@@ -2,9 +2,10 @@ from typing import List
 import torch.nn as nn
 import torch
 from ldm.modules.attention import BasicTransformerBlock
-from quant.quant_block import QuantAttentionBlock, QuantAttnBlock, QuantQKMatMul, QuantResnetBlock, QuantSMVMatMul, QuantTemporalInformationBlock, QuantTemporalInformationBlockDDIM, b2qb, BaseQuantBlock
+from quant.quant_block import QuantAttentionBlock, QuantAttnBlock, QuantQKMatMul, QuantResnetBlock, QuantSMVMatMul, QuantTemporalInformationBlock, QuantTemporalInformationBlockDDIM, b2qb, BaseQuantBlock, QuantDiffBTB, QuantTemporalInformationBlockPixArt
 from quant.quant_block import QuantBasicTransformerBlock, QuantResBlock
 from quant.quant_layer import QMODE, QuantLayer, StraightThrough
+from quant.quant_aware_attn_processors import QuantAttnProcessor
 
 
 class QuantModel(nn.Module):
@@ -27,6 +28,8 @@ class QuantModel(nn.Module):
         self.quant_block(self.model, wq_params, aq_params)
         if cali:
             self.get_tib(self.model, wq_params, aq_params)
+        # Pixart
+        self.forward = model.forward
 
     def get_tib(self,
                     module: nn.Module,
@@ -38,6 +41,8 @@ class QuantModel(nn.Module):
                 self.tib = QuantTemporalInformationBlockDDIM(child, aq_params, self.model.ch)
             elif name == 'time_embed':
                 self.tib = QuantTemporalInformationBlock(child, aq_params, self.model.model_channels, None)
+            elif name == 'adaln_single':
+                self.tib = QuantTemporalInformationBlockPixArt(child, aq_params)
             elif isinstance(child, QuantResBlock):
                 self.tib.add_emb_layer(child.emb_layers)
             elif isinstance(child, QuantResnetBlock):
@@ -74,6 +79,8 @@ class QuantModel(nn.Module):
             if child.__class__.__name__ in self.B:
                 if self.B[child.__class__.__name__] in [QuantBasicTransformerBlock, QuantAttnBlock]:
                     setattr(module, name, self.B[child.__class__.__name__](child, aq_params, softmax_a_bit = self.softmax_a_bit))
+                elif self.B[child.__class__.__name__] in [QuantDiffBTB]:
+                    setattr(module, name, self.B[child.__class__.__name__](child, aq_params, sm_abit = self.softmax_a_bit))
                 elif self.B[child.__class__.__name__] in [QuantResnetBlock, QuantAttentionBlock, QuantResBlock]:
                     setattr(module, name, self.B[child.__class__.__name__](child, aq_params))
                 elif self.B[child.__class__.__name__] in [QuantSMVMatMul]:
@@ -91,6 +98,7 @@ class QuantModel(nn.Module):
             if isinstance(m, (BaseQuantBlock, QuantLayer)):
                 m.set_quant_state(use_wq=use_wq, use_aq=use_aq)
 
+    '''
     def forward(self,
                 x: torch.Tensor,
                 timestep: int = None,
@@ -99,6 +107,21 @@ class QuantModel(nn.Module):
         if context is None:
             return self.model(x, timestep)
         return self.model(x, timestep, context)
+    '''
+    def forward(self, latent_model_input,
+                    t,
+                    encoder_hidden_states,
+                    cross_attention_kwargs,
+                    added_cond_kwargs,
+                    return_dict=False,
+                ):
+        return self.model(
+            sample=latent_model_input, 
+            timestep=t, 
+            encoder_hidden_states=encoder_hidden_states, 
+            cross_attention_kwargs=cross_attention_kwargs, 
+            added_cond_kwargs=added_cond_kwargs, 
+            return_dict=return_dict)
 
     def disable_out_quantization(self) -> None:
         modules = []
@@ -158,4 +181,14 @@ class QuantModel(nn.Module):
                 m.aqtizer_w.running_stat = running_stat
             elif isinstance(m, QuantLayer):
                 m.set_running_stat(running_stat)
+            elif isinstance(m, QuantDiffBTB):
+                m.attn1.act_quantizer_q.running_stat = running_stat
+                m.attn1.act_quantizer_k.running_stat = running_stat
+                m.attn1.act_quantizer_v.running_stat = running_stat
+                m.attn1.act_quantizer_w.running_stat = running_stat
+                if m.attn2 is not None:
+                    m.attn2.act_quantizer_q.running_stat = running_stat
+                    m.attn2.act_quantizer_k.running_stat = running_stat
+                    m.attn2.act_quantizer_v.running_stat = running_stat
+                    m.attn2.act_quantizer_w.running_stat = running_stat
 
