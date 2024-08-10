@@ -62,7 +62,14 @@ def layer_reconstruction(model: QuantModel,
     device = next(layer.parameters()).device
     for i in range(iters):
         idx = torch.randperm(cached_inputs[0].size(0))[: batch_size]
-        cur_inputs = (x[idx].to(device=device) for x in cached_inputs) # ^x
+        #idx = idx.tolist() # The tensor(idx) doesn't work with the [None, None, ...]
+        #cur_inputs = (x[idx].to(device=device) for x in cached_inputs) # ^x
+        cur_inputs = (
+            x[idx].to(device=device) if isinstance(x, torch.Tensor) else (
+                None if isinstance(x, list) else None # [None] * len(idx)
+            )
+            for x in cached_inputs
+        )
         cur_outputs = cached_outputs[idx].to(device=device) # z
         cur_grads = cached_grads[idx].to(device=device) if opt_mode != RLOSS.MSE else None
         optimizer.zero_grad()
@@ -181,7 +188,14 @@ def block_reconstruction(model: QuantModel,
     device = next(block.parameters()).device
     for i in range(iters):
         idx = torch.randperm(cached_inputs[0].size(0))[: batch_size]
-        cur_inputs = (x[idx].to(device=device) for x in cached_inputs)
+        #idx = idx.tolist() # The tensor(idx) doesn't work with the [None, None, ...]
+        #cur_inputs = (x[idx].to(device=device) for x in cached_inputs)
+        cur_inputs = (
+            x[idx].to(device=device) if isinstance(x, torch.Tensor) else (
+                None if isinstance(x, list) else None #[None] * len(idx)
+            )
+            for x in cached_inputs
+        )
         cur_outputs = cached_outputs[idx].to(device=device)
         cur_grads = cached_grads[idx].to(device=device) if opt_mode != RLOSS.MSE else None
         optimizer.zero_grad()
@@ -301,7 +315,14 @@ def tib_reconstruction(block: BaseQuantBlock,
     device = next(block.parameters()).device
     for i in range(iters):
         idx = torch.randperm(cached_inputs[0].size(0))[: batch_size]
-        cur_inputs = (x[idx].to(device=device) for x in cached_inputs)
+        #idx = idx.tolist() # The tensor(idx) doesn't work with the [None, None, ...]
+        #cur_inputs = (x[idx].to(device=device) for x in cached_inputs)
+        cur_inputs = (
+            x[idx].to(device=device) if isinstance(x, torch.Tensor) else (
+                None if isinstance(x, list) else None # [None] * len(idx)
+            )
+            for x in cached_inputs
+        )
         cur_outputs = (x[idx].to(device=device) for x in cached_outputs)
         optimizer.zero_grad()
         out_quant = block(*cur_inputs)

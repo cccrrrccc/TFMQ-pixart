@@ -43,7 +43,7 @@ def mse(x: torch.Tensor,
     x_min, x_max = x.min().item(), x.max().item()
     delta, zero_point = None, None
     s = 1e+10
-    for i in range(80):
+    for i in range(1): #80
         new_min = x_min * (1. - (i * 0.01))
         new_max = x_max * (1. - (i * 0.01))
         new_delta = torch.tensor(float(new_max - new_min) / (level - 1))
@@ -335,9 +335,9 @@ class QuantLayer(nn.Module):
         w = w.to(x.device)
         if type(b) == torch.Tensor:
             b = b.to(x.device)
-        x = x.half()
-        w = w.half()
-        b = b.half()
+        x = x.half().to(x.device)
+        w = w.half().to(x.device)
+        b = b.half().to(x.device)
         x = self.kwd_func(x, w, b, **self.fwd_kwargs)
         x = self.act_func(x)
         return x

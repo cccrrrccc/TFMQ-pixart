@@ -355,6 +355,12 @@ def main():
         "--cali_st", type=int, default=20,
         help="number of samples for each timestep for qdiff reconstruction"
     )
+    parser.add_argument(
+        "--res",
+        type=int,
+        default=512,
+        help="image height, in pixel space",
+    )
     # multi-gpu configs
     parser.add_argument('--multi_gpu', action='store_true', help='use multiple gpus')
     parser.add_argument('--dist-url', default='tcp://127.0.0.1:3367', type=str, help='')

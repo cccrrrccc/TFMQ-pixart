@@ -28,12 +28,19 @@ def save_inout(model: QuantModel,
         if cached_inputs is None:
             cached_inputs = tuple([] for _ in range(len(ipts)))
         for j in range(len(ipts)):
-            cached_inputs[j].append(ipts[j].cpu())
+            if (ipts[j] is not None):
+                cached_inputs[j].append(ipts[j].cpu())
+            else:
+                cached_inputs[j].append(ipts[j])
         if cached_outputs is None:
             cached_outputs = tuple([] for _ in range(len(opts)))
         for j in range(len(opts)):
             cached_outputs[j].append(opts[j].cpu())
-    cached_inputs = tuple((torch.cat([y for y in x]) for x in cached_inputs))
+    #cached_inputs = tuple((torch.cat([y for y in x]) for x in cached_inputs))
+    #for x in cached_inputs:
+        #print(x) [None, None, None, None, None]
+        #print(torch.cat([y for y in x]))
+    cached_inputs = tuple(torch.cat([y for y in x]) if x is not None and all(y is not None for y in x) else x for x in cached_inputs)
     cached_outputs = tuple((torch.cat([y for y in x]) for x in cached_outputs))
     torch.cuda.empty_cache()
     if keep_gpu:
@@ -41,6 +48,8 @@ def save_inout(model: QuantModel,
         cached_outputs = tuple(x.to(device) for x in cached_outputs)
     # assert len(cached_outputs) == 1
     for i, x in enumerate(cached_inputs):
+        if (not all(y is not None for y in x)):
+            continue
         if '0' in str(x.device) or 'cpu' in str(x.device):
             logger.info(f'input {i} shape: {x.shape}')
     for i, x in enumerate(cached_outputs):
@@ -105,6 +114,15 @@ class DataSaverHook:
                 self.input_store = input_batch[:-1]
             if isinstance(module, QuantBasicTransformerBlock): # in order to capture context
                 self.input_store = (input_batch[0], kwargs["context"])
+            if hasattr(module, "ts_cache"):
+                self.input_store = (input_batch[0],
+                                    module.am_cache,
+                                    module.ehs_cache,
+                                    module.eam_cache,
+                                    module.ts_cache,
+                                    module.cak_cache,
+                                    module.class_labels,
+                                    module.added_cond_kwargs)  # add module.added_cond_kwargs
         if self.store_output:
             self.output_store = output_batch
         if self.stop_forward:
@@ -138,7 +156,8 @@ class GetLayerInpOut:
         with torch.no_grad():
             try:
                 if cs is not None:
-                    _ = self.model(xs.to(self.device), ts.to(self.device), cs.to(self.device))
+                    # _ = self.model(xs.to(self.device), ts.to(self.device), cs.to(self.device))
+                    _ = self.model(xs.to(self.device), timestep=ts.to(self.device), encoder_hidden_states=cs.to(self.device), added_cond_kwargs = pixart_alpha_aca_dict(xs.to(self.device)))
                 else:
                     _ = self.model(xs.to(self.device), ts.to(self.device))
             except StopForwardException:
@@ -150,7 +169,8 @@ class GetLayerInpOut:
                 self.model.set_quant_state(use_wq=True, use_aq=self.use_aq)
                 try:
                     if cs is not None:
-                        _ = self.model(xs.to(self.device), ts.to(self.device), cs.to(self.device))
+                        #_ = self.model(xs.to(self.device), ts.to(self.device), cs.to(self.device))
+                        _ = self.model(xs.to(self.device), timestep=ts.to(self.device), encoder_hidden_states=cs.to(self.device), added_cond_kwargs = pixart_alpha_aca_dict(xs.to(self.device)))
                     else:
                         _ = self.model(xs.to(self.device), ts.to(self.device))
                 except StopForwardException:
@@ -163,6 +183,7 @@ class GetLayerInpOut:
         self.layer.set_quant_state(True, self.use_aq)
         self.model.train()
         if isinstance(self.layer, QuantDiffBTB):
+            '''
             return (self.data_saver.input_store[0].detach().cpu(),
                     self.data_saver.input_store[1].detach().cpu() if self.data_saver.input_store[1] is not None else None,
                     self.data_saver.input_store[2].detach().cpu() if self.data_saver.input_store[2] is not None else None,
@@ -170,7 +191,16 @@ class GetLayerInpOut:
                     self.data_saver.input_store[4].detach().cpu() if self.data_saver.input_store[4] is not None else None,
                     self.data_saver.input_store[5].detach().cpu() if self.data_saver.input_store[5] is not None else None,
                     self.data_saver.input_store[6].detach().cpu() if self.data_saver.input_store[6] is not None else None,
-                    self.data_saver.input_store[7].detach().cpu() if self.data_saver.input_store[7] is not None else None), self.data_saver.output_store.detach().cpu()
+                    self.data_saver.input_store[7].detach().cpu() if self.data_saver.input_store[7] is not None else None), tuple([self.data_saver.output_store.detach().cpu()])
+            '''
+            return (self.data_saver.input_store[0].detach(),
+                    self.data_saver.input_store[1].detach() if self.data_saver.input_store[1] is not None else None,
+                    self.data_saver.input_store[2].detach() if self.data_saver.input_store[2] is not None else None,
+                    self.data_saver.input_store[3].detach() if self.data_saver.input_store[3] is not None else None,
+                    self.data_saver.input_store[4].detach() if self.data_saver.input_store[4] is not None else None,
+                    self.data_saver.input_store[5].detach() if self.data_saver.input_store[5] is not None else None,
+                    self.data_saver.input_store[6].detach() if self.data_saver.input_store[6] is not None else None,
+                    self.data_saver.input_store[7].detach() if self.data_saver.input_store[7] is not None else None), tuple([self.data_saver.output_store.detach()])
         input_stores = tuple(x.detach() for x in self.data_saver.input_store)
         if isinstance(self.data_saver.output_store, torch.Tensor):
             output_stores = tuple([self.data_saver.output_store.detach()])
@@ -265,7 +295,12 @@ class GetLayerGrad:
         self.model.train()
         return self.data_saver.grad_out.data
 
-
+def pixart_alpha_aca_dict(x):
+    bs = x.shape[0]
+    hw = x.shape[2] * 8
+    return {'resolution': torch.Tensor([[hw, hw]]).expand(bs, -1).to("cuda:0", torch.float16),
+            'aspect_ratio': torch.Tensor([[1.]]).expand(bs, -1).to("cuda:0", torch.float16)
+            }
 
 
 
