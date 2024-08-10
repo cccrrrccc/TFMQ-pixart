@@ -29,6 +29,10 @@ class QuantModel(nn.Module):
         if cali:
             self.get_tib(self.model, wq_params, aq_params)
         # Pixart
+        if hasattr(model, "config"):
+            self.config = model.config
+        if hasattr(model, "dtype"):
+            self.dtype=model.dtype
         self.forward = model.forward
 
     def get_tib(self,

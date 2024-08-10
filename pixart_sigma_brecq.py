@@ -394,8 +394,8 @@ def main():
         ]
     )
     logger = logging.getLogger(__name__)
-    from diffusers import PixArtAlphaPipeline
-    model = PixArtAlphaPipeline.from_pretrained("PixArt-alpha/PixArt-XL-2-1024-MS", torch_dtype=torch.float16).to("cuda")
+    from diffusers import PixArtAlphaPipeline, PixArtSigmaPipeline
+    model = PixArtSigmaPipeline.from_pretrained("PixArt-alpha/PixArt-Sigma-XL-2-1024-MS", torch_dtype=torch.float16, use_safetensors=True).to("cuda")
     #model = PixArtAlphaPipeline.from_pretrained("PixArt-alpha/PixArt-XL-2-512x512", torch_dtype=torch.float16).to("cuda")
     # NOTE to Ruichen. For debugging, you can do this to cheat and make sure the code functionally works. Since the transformer_blocks are sequential.
     #model.transformer.transformer_blocks = model.transformer.transformer_blocks[:1]

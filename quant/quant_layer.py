@@ -43,7 +43,7 @@ def mse(x: torch.Tensor,
     x_min, x_max = x.min().item(), x.max().item()
     delta, zero_point = None, None
     s = 1e+10
-    for i in range(1): #80
+    for i in range(80): #80
         new_min = x_min * (1. - (i * 0.01))
         new_max = x_max * (1. - (i * 0.01))
         new_delta = torch.tensor(float(new_max - new_min) / (level - 1))
