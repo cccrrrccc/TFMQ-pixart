@@ -30,6 +30,7 @@ class AdaRoundQuantizer(nn.Module):
 
     def init_alpha(self, x: torch.Tensor) -> None:
         self.delta = self.delta.to(x.device)
+        self.delta = torch.clamp(self.delta, min=1e-8)
         if self.rmode == RMODE.LEARNED_HARD_SIGMOID:
             rest = (x / self.delta) - torch.floor(x / self.delta)
             alpha = -torch.log((self.zeta - self.gamma) / (rest - self.gamma) - 1)

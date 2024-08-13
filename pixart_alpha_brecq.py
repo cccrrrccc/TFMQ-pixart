@@ -426,10 +426,10 @@ def main():
     opt.running_stat = True
     wq_params = {"bits": opt.wq,
                  "channel_wise": True,
-                 "scaler": Scaler.MSE if opt.cali else Scaler.MINMAX}
+                 "scaler": Scaler.MINMAX if opt.cali else Scaler.MINMAX}
     aq_params = {"bits": opt.aq,
                  "channel_wise": False,
-                 "scaler": Scaler.MSE if opt.cali else Scaler.MINMAX,
+                 "scaler": Scaler.MINMAX if opt.cali else Scaler.MINMAX,
                  "leaf_param": opt.use_aq}
     assert(opt.cond)
     if opt.ptq:
