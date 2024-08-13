@@ -48,6 +48,8 @@ class AdaRoundQuantizer(nn.Module):
         if isinstance(self.zero_point, torch.Tensor):
             self.zero_point = self.zero_point.to(x.device)
 
+        self.delta = torch.clamp(self.delta, min=1e-8)
+
         x_floor = torch.floor(x / self.delta)
         if self.rmode == RMODE.NEAREST:
             x_int  = torch.round(x / self.delta)
